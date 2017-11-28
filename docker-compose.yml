@@ -1,0 +1,118 @@
+version: "3"
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:6.0.0
+    environment:
+      - xpack.security.enabled=false
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - ./elasticsearch/data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - elk
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:6.0.0
+    ports:
+      - "5044:5044"
+    volumes:
+      - ./logstash/pipeline/:/usr/share/logstash/pipeline/
+      - ./logstash/sslkeys/:/sslkeys/
+    networks:
+      - elk
+    depends_on:
+      - elasticsearch
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:6.0.0
+    ports:
+      - "5601:5601"
+    environment:
+      - VIRTUAL_HOST=${ELK_HOST}
+      - LETSENCRYPT_HOST=${ELK_HOST}
+      - LETSENCRYPT_EMAIL=admin@${ELK_HOST}
+    networks:
+      - elk
+    depends_on:
+      - elasticsearch
+
+  setup_metricbeat:
+    image: docker.elastic.co/beats/metricbeat:6.0.0
+    command: ['/bin/sh', '-c', 'sleep 60; metricbeat setup -E setup.kibana.host=kibana']
+    networks:
+      - elk
+    depends_on:
+      - kibana
+
+  setup_filebeat:
+    image: docker.elastic.co/beats/filebeat:6.0.0
+    command: ['/bin/sh', '-c', 'sleep 80; filebeat setup -E setup.kibana.host=kibana']
+    networks:
+      - elk
+    depends_on:
+      - kibana
+
+  nginx:
+    image: nginx:stable-alpine
+    container_name: nginx
+    labels:
+      com.github.jrcs.letsencrypt_nginx_proxy_companion.nginx_proxy: "true"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/vhost.d:/etc/nginx/vhost.d
+      - ./nginx/html:/usr/share/nginx/html
+      - ./nginx/htpasswd:/etc/nginx/htpasswd
+      - ./nginx/certs:/etc/nginx/certs:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - elk
+
+  dockergen:
+    image: jwilder/docker-gen
+    labels:
+      com.github.jrcs.letsencrypt_nginx_proxy_companion.docker_gen: "true"
+    command: -notify-sighup nginx -watch /etc/docker-gen/templates/nginx.tmpl /etc/nginx/conf.d/default.conf
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/vhost.d:/etc/nginx/vhost.d
+      - ./nginx/html:/usr/share/nginx/html
+      - ./nginx/htpasswd:/etc/nginx/htpasswd
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - ./nginx.tmpl:/etc/docker-gen/templates/nginx.tmpl:ro
+    networks:
+      - elk
+
+  nginx-letsencrypt:
+    image: jrcs/letsencrypt-nginx-proxy-companion
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/vhost.d:/etc/nginx/vhost.d
+      - ./nginx/html:/usr/share/nginx/html
+      - ./nginx/certs:/etc/nginx/certs:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - ACME_TOS_HASH=cc88d8d9517f490191401e7b54e9ffd12a2b9082ec7a1d4cec6101f9f1647e7b
+      #- ACME_CA_URI=https://acme-staging.api.letsencrypt.org/directory
+      #- DEBUG=true
+    networks:
+      - elk
+    depends_on:
+      - nginx
+      - dockergen
+
+networks:
+  elk:
+    driver: bridge
